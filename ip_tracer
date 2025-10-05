@@ -1,0 +1,305 @@
+import os
+import sys
+import time
+import json
+import webbrowser
+import platform
+import shutil
+import subprocess
+import socket
+from datetime import datetime
+from typing import Optional, Tuple
+
+# -------- Configuration --------
+TELEGRAM_LINK = "https://t.me/+qPkRrWEAblFkNTdk"   # your channel link
+DEV_NAME = "CYBER ALPHA"
+LOG_DIR = os.path.join(os.path.expanduser("~"), ".cyber_alpha_traces")
+API_URL_TEMPLATE = "http://ip-api.com/json/{ip}?fields=status,message,country,regionName,city,zip,lat,lon,timezone,isp,org,as,query,reverse,proxy,hosting"
+# --------------------------------
+
+try:
+    from colorama import init as _colorama_init, Fore, Style
+    _colorama_init(autoreset=True)
+    WHITE = Fore.WHITE
+    GREEN = Fore.GREEN
+    RED = Fore.RED
+    RESET = Style.RESET_ALL
+except Exception:
+    # minimal ANSI fallback (Unix-friendly)
+    WHITE = "\033[97m"
+    GREEN = "\033[92m"
+    RED = "\033[91m"
+    RESET = "\033[0m"
+
+def tiny_pause(short: bool = True) -> None:
+    time.sleep(0.15 if short else 0.45)
+
+def clear_screen() -> None:
+    """Clear the terminal screen in a cross-platform way, including Termux."""
+    try:
+        # Windows
+        if os.name == "nt":
+            os.system("cls")
+        else:
+            # many Unix systems (macOS, Linux, Termux) support 'clear'
+            os.system("clear")
+    except Exception:
+        # last resort
+        print("\n" * 80)
+
+def print_header() -> None:
+    """Print a simple header with developer name (no ASCII art)."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(GREEN + f"CYBER ALPHA ".ljust(80) + RESET)
+    print(WHITE + f"Dev: {DEV_NAME}    Started: {now}".ljust(80) + RESET)
+    print("-" * 80)
+
+def try_open_telegram(url: str) -> None:
+    """
+    Try many ways to open the Telegram link:
+    - webbrowser.open
+    - xdg-open (Linux), open (macOS), start (Windows)
+    - termux-open-url (Termux)
+    After opening, ask the user to press Enter when they've joined.
+    """
+    print(WHITE + "Opening Telegram channel. A browser or app should open now..." + RESET)
+    tiny_pause()
+    opened = False
+
+    # 1) Try webbrowser
+    try:
+        webbrowser.open(url, new=2)
+        opened = True
+    except Exception:
+        opened = False
+
+    # 2) Termux-specific
+    if not opened and "TERMUX_VERSION" in os.environ:
+        if shutil.which("termux-open-url"):
+            try:
+                subprocess.Popen(["termux-open-url", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                opened = True
+            except Exception:
+                opened = False
+
+    # 3) Platform fallbacks
+    if not opened:
+        system = platform.system().lower()
+        try:
+            if "linux" in system and shutil.which("xdg-open"):
+                subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                opened = True
+            elif "darwin" in system:
+                subprocess.Popen(["open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                opened = True
+            elif "windows" in system:
+                # os.startfile available on Windows
+                try:
+                    os.startfile(url)  # type: ignore[attr-defined]
+                    opened = True
+                except Exception:
+                    # fallback to start via cmd
+                    subprocess.Popen(["cmd", "/c", "start", "", url], shell=True)
+                    opened = True
+        except Exception:
+            opened = False
+
+    if not opened:
+        print(RED + "Automatic opening failed. Please open this link manually:" + RESET)
+        print(WHITE + url + RESET)
+
+    print(WHITE + "After you join the channel, press ENTER to continue. Press Ctrl+C to abort." + RESET)
+    try:
+        input("> ")
+    except KeyboardInterrupt:
+        print("\n" + RED + "Interrupted by user before joining Telegram. Exiting." + RESET)
+        sys.exit(0)
+
+def ensure_log_directory() -> None:
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+def save_json_log(record: dict, prefix: str = "trace") -> Optional[str]:
+    """Save record to a JSON file and return path or None on failure."""
+    ensure_log_directory()
+    filename = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    path = os.path.join(LOG_DIR, filename)
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2, ensure_ascii=False)
+        return path
+    except Exception:
+        return None
+
+def fetch_geo_info(ip_or_domain: str, timeout: int = 10) -> dict:
+    """Query ip-api.com for geolocation. Returns a dict with the API response."""
+    import urllib.request
+    import urllib.error
+
+    url = API_URL_TEMPLATE.format(ip=ip_or_domain)
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (CYBERALPHA)"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="ignore")
+            return json.loads(raw)
+    except urllib.error.HTTPError as he:
+        return {"status": "fail", "message": f"HTTPError {he.code}"}
+    except Exception as e:
+        return {"status": "fail", "message": str(e)}
+
+def run_system_traceroute(target_ip: str) -> Tuple[bool, str]:
+    """
+    Attempt to run traceroute/tracert/tracepath depending on platform.
+    Returns (success, output_text_or_error_msg)
+    """
+    system = platform.system().lower()
+    # Windows
+    if "windows" in system:
+        prog = "tracert"
+        args = [prog, "-d", target_ip]  # -d to skip DNS
+    else:
+        # Unix-like
+        if shutil.which("traceroute"):
+            prog = "traceroute"
+            args = [prog, "-n", "-w", "2", "-q", "1", target_ip]
+        elif shutil.which("tracepath"):
+            prog = "tracepath"
+            args = [prog, target_ip]
+        else:
+            return False, "No traceroute or tracepath utility found."
+
+    try:
+        proc = subprocess.run(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=180)
+        return True, proc.stdout
+    except Exception as e:
+        return False, f"Traceroute failed: {e}"
+
+def pretty_print_geo(geo: dict) -> None:
+    """Print geo info only with white/green/red colors, handling missing fields safely."""
+    if geo.get("status") != "success":
+        print(RED + "Lookup failed:" + RESET, WHITE + str(geo.get("message", "unknown")) + RESET)
+        return
+
+    # safe get helper (function)
+    g = lambda k: str(geo.get(k, "N/A"))
+
+    print(GREEN + "IP" + RESET + ": " + WHITE + g("query") + RESET)
+    print(GREEN + "Country / Region" + RESET + ": " + WHITE + f"{g('country')} / {g('regionName')}" + RESET)
+    print(GREEN + "City / ZIP" + RESET + ": " + WHITE + f"{g('city')} / {g('zip')}" + RESET)
+    print(GREEN + "Coordinates" + RESET + ": " + WHITE + f"{g('lat')}, {g('lon')}" + RESET)
+    print(GREEN + "Timezone" + RESET + ": " + WHITE + g("timezone") + RESET)
+    print(GREEN + "ISP / Org" + RESET + ": " + WHITE + f"{g('isp')} / {g('org')}" + RESET)
+    print(GREEN + "AS" + RESET + ": " + WHITE + g("as") + RESET)
+
+    # proxy/hosting are booleans (or missing). Use geo.get directly for those.
+    proxy = geo.get("proxy", "N/A")
+    hosting = geo.get("hosting", "N/A")
+    reverse = geo.get("reverse", "N/A")
+
+    print(GREEN + "Reverse / Proxy / Hosting" + RESET + ": " + WHITE +
+          f"{reverse} / proxy={proxy} / hosting={hosting}" + RESET)
+
+def resolve_domain_to_ip(target: str) -> str:
+    """
+    If user gave a domain, try to resolve to IP. If user typed 'me' return caller IP via API.
+    If DNS resolution fails, return the original target to let the API attempt resolution.
+    """
+    t = target.strip()
+    if t.lower() in ("me", "myip", "my ip"):
+        # ip-api with empty query returns caller IP info
+        geo = fetch_geo_info("")
+        return geo.get("query", "")
+    # crude domain detection: letters present and not an IP-like pattern
+    if any(c.isalpha() for c in t):
+        try:
+            ip = socket.gethostbyname(t)
+            return ip
+        except Exception:
+            # leave as-is; the lookup API can still accept domain names
+            return t
+    return t
+
+def get_user_input(prompt_text: str) -> Optional[str]:
+    """Wrapper to get input and handle KeyboardInterrupt cleanly."""
+    try:
+        return input(WHITE + prompt_text + RESET).strip()
+    except KeyboardInterrupt:
+        print("\n" + RED + "Interrupted by user. Exiting." + RESET)
+        sys.exit(0)
+
+def main() -> None:
+    # initial setup & UX
+    clear_screen()
+    print_header()
+    # Open telegram link and ensure user sees it and confirms join
+    try_open_telegram(TELEGRAM_LINK)
+    tiny_pause()
+    clear_screen()
+    print_header()
+
+    # main loop
+    while True:
+        target = get_user_input("Enter IP or domain to trace (or 'me' for your public IP). Blank to exit: ")
+        if not target:
+            print(WHITE + "No target entered. Exiting cleanly." + RESET)
+            return
+
+        resolved = resolve_domain_to_ip(target)
+        print(WHITE + f"Using: {resolved}" + RESET)
+        tiny_pause()
+
+        # fetch geo
+        geo = fetch_geo_info(resolved)
+        print()
+        pretty_print_geo(geo)
+        print()
+
+        # ask traceroute
+        do_tr = get_user_input("Run traceroute? (y/N): ").lower()
+        traceroute_output = None
+        if do_tr == "y":
+            print(WHITE + "Starting traceroute. This may take up to a couple minutes." + RESET)
+            tiny_pause()
+            ok, out = run_system_traceroute(resolved)
+            if ok:
+                print(GREEN + "Traceroute output:" + RESET)
+                # print output but keep colors only white (convert to white text)
+                print(WHITE + out + RESET)
+                traceroute_output = out
+            else:
+                print(RED + "Traceroute not available or failed:" + RESET, WHITE + out + RESET)
+
+        # prepare log
+        record = {
+            "entered": target,
+            "resolved": resolved,
+            "timestamp": datetime.now().isoformat(),
+            "geo": geo,
+            "traceroute": traceroute_output
+        }
+        saved_path = save_json_log(record, prefix="cyberalpha_trace")
+        if saved_path:
+            print(GREEN + f"Saved trace to: {saved_path}" + RESET)
+        else:
+            print(RED + "Failed to save trace log." + RESET)
+
+        # ask if user wants another trace
+        again = get_user_input("Trace another? (Y/n): ").lower()
+        if again == "n":
+            print(WHITE + "Bye — stay safe. (CYBER ALPHA)" + RESET)
+            return
+        clear_screen()
+        print_header()
+
+if __name__ == "__main__":
+    # protect main with KeyboardInterrupt catch here too
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n" + RED + "Keyboard interrupt received. Exiting." + RESET)
+        try:
+            sys.exit(0)
+        except SystemExit:
+            os._exit(0)
